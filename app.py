@@ -1,7 +1,9 @@
 # ============================================
-# TRADING JOURNAL - modern edition
+# TRADING JOURNAL - neon green / red edition
 # Python + Streamlit + SQLite + Pandas + Altair
 # Pair with .streamlit/config.toml (dark theme)
+# The whole UI glows GREEN when you are net profitable
+# and RED when you are net negative.
 # ============================================
 
 import html
@@ -28,75 +30,82 @@ st.set_page_config(
 
 DB_NAME = "trades.db"
 
-AMBER, MINT, CORAL, MUTED = "#f2b84b", "#4fd1a1", "#ff7a70", "#8fb0ae"
+GREEN, RED, MUTED = "#2bff88", "#ff3b5c", "#8a979a"
+RGB = {GREEN: "43,255,136", RED: "255,59,92"}
 
 CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Manrope:wght@400;500;600;700&display=swap');
-:root{--bg:#0b1c20;--panel:#112a30;--panel2:#163239;--line:#24464e;--text:#e9f2f0;--muted:#8fb0ae;--amber:#f2b84b;--mint:#4fd1a1;--coral:#ff7a70;}
-html,body,.stApp{font-family:'Manrope',sans-serif;}
-.stApp{background:var(--bg);color:var(--text);}
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap');
+:root{--acc:__ACC__;--rgb:__RGB__;--g:#2bff88;--r:#ff3b5c;--bg:#07090b;--card:rgba(255,255,255,.04);--line:rgba(255,255,255,.09);--text:#f4f7f5;--muted:#8a979a;}
+html,body,.stApp{font-family:'Inter',sans-serif;}
+.stApp{background:radial-gradient(1000px 520px at 85% -8%,rgba(var(--rgb),.17),transparent 60%),radial-gradient(700px 440px at -5% 45%,rgba(var(--rgb),.07),transparent 60%),var(--bg);color:var(--text);}
 [data-testid="stHeader"]{background:transparent;}
 footer,[data-testid="stDecoration"]{display:none;}
-.block-container{padding-top:2.2rem;max-width:1360px;}
+.block-container{padding-top:1.8rem;max-width:1380px;}
 :where(.stApp p,.stApp label,.stApp li){color:var(--text);}
 
 /* sidebar + form */
-[data-testid="stSidebar"]{background:var(--panel);border-right:1px solid var(--line);}
+[data-testid="stSidebar"]{background:rgba(10,14,16,.92);border-right:1px solid rgba(var(--rgb),.25);}
 [data-testid="stForm"]{border:0;padding:0;}
-.side-title{font-family:'Fraunces',serif;font-size:1.5rem;font-weight:600;margin:0 0 .15rem;}
-.side-sub{color:var(--muted);font-size:.85rem;margin-bottom:1rem;}
+.side-title{font-family:'Sora',sans-serif;font-size:1.5rem;font-weight:800;letter-spacing:-.02em;}
+.side-sub{color:var(--muted);font-size:.85rem;margin:.1rem 0 1rem;}
 
 /* inputs */
-div[data-baseweb="input"],div[data-baseweb="select"]>div,div[data-baseweb="textarea"]{background:var(--bg)!important;border:1px solid var(--line)!important;border-radius:10px!important;}
-div[data-baseweb="input"]:focus-within,div[data-baseweb="select"]>div:focus-within,div[data-baseweb="textarea"]:focus-within{border-color:var(--amber)!important;box-shadow:0 0 0 3px rgba(242,184,75,.16)!important;}
-[data-testid="stFileUploaderDropzone"]{background:var(--bg);border:1.5px dashed var(--line);border-radius:12px;}
+div[data-baseweb="input"],div[data-baseweb="select"]>div,div[data-baseweb="textarea"]{background:rgba(255,255,255,.05)!important;border:1px solid var(--line)!important;border-radius:12px!important;}
+div[data-baseweb="input"]:focus-within,div[data-baseweb="select"]>div:focus-within,div[data-baseweb="textarea"]:focus-within{border-color:var(--acc)!important;box-shadow:0 0 0 3px rgba(var(--rgb),.2)!important;}
+[data-testid="stFileUploaderDropzone"]{background:rgba(255,255,255,.03);border:1.5px dashed rgba(var(--rgb),.45);border-radius:14px;}
 
 /* buttons */
-.stButton>button,.stDownloadButton>button,[data-testid="stFormSubmitButton"]>button{border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--text);font-weight:600;transition:border-color .15s,background .15s;}
-.stButton>button:hover,.stDownloadButton>button:hover{border-color:var(--amber);color:var(--amber);}
-[data-testid="stFormSubmitButton"]>button{background:var(--amber);border:0;color:#1a1305;padding:.55rem 1rem;}
-[data-testid="stFormSubmitButton"]>button:hover{background:#ffcb66;color:#1a1305;}
+.stButton>button,.stDownloadButton>button,[data-testid="stFormSubmitButton"]>button{border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--text);font-weight:600;transition:all .15s;}
+.stButton>button:hover,.stDownloadButton>button:hover{border-color:var(--acc);color:var(--acc);box-shadow:0 0 20px rgba(var(--rgb),.2);}
+[data-testid="stFormSubmitButton"]>button{background:linear-gradient(135deg,#2bff88,#00c46a);border:0;color:#04130b;font-weight:700;padding:.6rem 1rem;box-shadow:0 8px 28px rgba(43,255,136,.3);}
+[data-testid="stFormSubmitButton"]>button:hover{color:#04130b;filter:brightness(1.1);}
 
-/* tabs: quiet underline */
-.stTabs [data-baseweb="tab-list"]{gap:1.6rem;border-bottom:1px solid var(--line);}
-.stTabs [data-baseweb="tab"]{padding:.6rem 0;color:var(--muted);font-weight:600;background:transparent;}
-.stTabs [aria-selected="true"]{color:var(--text);}
-.stTabs [data-baseweb="tab-highlight"]{background:var(--amber);height:2px;}
-.stTabs [data-baseweb="tab-border"]{display:none;}
+/* pill tabs */
+.stTabs [data-baseweb="tab-list"]{gap:6px;background:var(--card);padding:6px;border-radius:16px;border:1px solid var(--line);width:fit-content;}
+.stTabs [data-baseweb="tab"]{height:40px;padding:0 20px;border-radius:11px;color:var(--muted);font-weight:600;background:transparent;}
+.stTabs [aria-selected="true"]{background:rgba(var(--rgb),.16);color:var(--acc);}
+.stTabs [data-baseweb="tab-highlight"],.stTabs [data-baseweb="tab-border"]{display:none;}
 
-/* header */
-.hero{display:flex;justify-content:space-between;align-items:flex-end;gap:1rem;flex-wrap:wrap;margin-bottom:1.4rem;}
-.title{font-family:'Fraunces',serif;font-size:2.6rem;font-weight:600;letter-spacing:-.02em;line-height:1.1;}
-.hero p{color:var(--muted);margin:.35rem 0 0;}
+/* top bar */
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:1.1rem;}
+.brand{font-family:'Sora',sans-serif;font-size:1.7rem;font-weight:800;letter-spacing:-.03em;}
+.live{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--acc);box-shadow:0 0 12px var(--acc);margin-right:10px;}
 .today{color:var(--muted);font-size:.9rem;}
 
-/* ledger panel (the one bold element) */
-.ledger{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:26px 26px 14px;height:100%;}
-.ledger .lbl{color:var(--muted);font-size:.9rem;}
-.big{font-family:'Fraunces',serif;font-size:3.1rem;font-weight:600;letter-spacing:-.02em;line-height:1.1;margin:.15rem 0 1rem;font-variant-numeric:tabular-nums;}
-.line{display:flex;justify-content:space-between;align-items:baseline;padding:.65rem 0;border-top:1px dashed var(--line);}
-.line span{color:var(--muted);font-size:.9rem;}
-.line b{font-variant-numeric:tabular-nums;font-weight:700;}
-.pos{color:var(--mint);}.neg{color:var(--coral);}
+/* hero */
+.hero{border-radius:26px;padding:30px 36px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:28px;flex-wrap:wrap;border:1px solid rgba(var(--rgb),.4);background:linear-gradient(135deg,rgba(var(--rgb),.22),rgba(var(--rgb),.04) 60%,transparent);box-shadow:0 24px 70px rgba(var(--rgb),.12);}
+.hero .t{color:var(--muted);font-weight:600;}
+.hero .n{font-family:'Sora',sans-serif;font-size:4.2rem;font-weight:800;letter-spacing:-.045em;line-height:1.05;color:var(--acc);text-shadow:0 0 44px rgba(var(--rgb),.5);font-variant-numeric:tabular-nums;}
+.hero .mini{display:flex;gap:34px;flex-wrap:wrap;}
+.hero .mini span{display:block;color:var(--muted);font-size:.8rem;margin-bottom:2px;}
+.hero .mini b{font-family:'Sora',sans-serif;font-size:1.4rem;font-variant-numeric:tabular-nums;}
 
-/* section headings */
-.sec{font-family:'Fraunces',serif;font-size:1.3rem;font-weight:500;margin:1.6rem 0 .6rem;}
-.sec small{font-family:'Manrope',sans-serif;color:var(--muted);font-size:.85rem;margin-left:.6rem;}
+/* kpi cards */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:6px;}
+.kpi{position:relative;overflow:hidden;padding:20px 22px;border-radius:20px;background:var(--card);border:1px solid var(--line);}
+.kpi:after{content:"";position:absolute;right:-30px;top:-30px;width:110px;height:110px;border-radius:50%;background:var(--c,var(--acc));opacity:.13;filter:blur(18px);}
+.kpi .l{color:var(--muted);font-size:.85rem;font-weight:500;}
+.kpi .v{font-family:'Sora',sans-serif;font-size:1.9rem;font-weight:700;margin-top:4px;color:var(--c,var(--text));font-variant-numeric:tabular-nums;}
+.kpi .s{color:var(--muted);font-size:.78rem;margin-top:2px;}
+.pos{color:var(--g);}.neg{color:var(--r);}
+
+.sec{font-family:'Sora',sans-serif;font-size:1.15rem;font-weight:700;margin:1.6rem 0 .6rem;}
+.sec small{font-family:'Inter',sans-serif;color:var(--muted);font-size:.85rem;font-weight:500;margin-left:.7rem;}
 
 /* charts, tables, images */
-[data-testid="stVegaLiteChart"],[data-testid="stArrowVegaLiteChart"]{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:16px;}
-[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:14px;overflow:hidden;}
-[data-testid="stImage"] img{border-radius:14px;border:1px solid var(--line);}
+[data-testid="stVegaLiteChart"],[data-testid="stArrowVegaLiteChart"]{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:16px;}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:16px;overflow:hidden;}
+[data-testid="stImage"] img{border-radius:16px;border:1px solid var(--line);}
 
-/* latest trades list */
-.row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:.8rem 0;border-bottom:1px solid var(--line);}
-.row .sym{font-weight:700;}
+/* latest trades */
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;margin-bottom:9px;border-radius:16px;background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c);}
+.row .sym{font-weight:700;font-size:1.02rem;}
 .row .meta{color:var(--muted);font-size:.8rem;margin-top:2px;}
-.row .amt{font-weight:700;font-variant-numeric:tabular-nums;}
-.tag{font-size:.72rem;font-weight:700;margin-left:.5rem;}
-.empty{text-align:center;padding:3.5rem 1rem;border:1.5px dashed var(--line);border-radius:20px;color:var(--muted);}
-.empty b{display:block;font-family:'Fraunces',serif;font-size:1.4rem;color:var(--text);margin-bottom:.3rem;}
+.row .amt{font-family:'Sora',sans-serif;font-weight:700;font-size:1.1rem;color:var(--c);font-variant-numeric:tabular-nums;}
+.tag{font-size:.72rem;font-weight:700;margin-left:.6rem;padding:2px 9px;border-radius:999px;background:rgba(255,255,255,.07);}
+.empty{text-align:center;padding:3.5rem 1rem;border:1.5px dashed rgba(var(--rgb),.4);border-radius:22px;color:var(--muted);}
+.empty b{display:block;font-family:'Sora',sans-serif;font-size:1.4rem;color:var(--text);margin-bottom:.3rem;}
 </style>
 """
 
@@ -126,7 +135,8 @@ def tone(value):
     return "pos" if value > 0 else "neg" if value < 0 else ""
 
 
-render(CSS)
+def color_of(value):
+    return GREEN if value >= 0 else RED
 
 
 # --------------------------------------------
@@ -180,6 +190,12 @@ def load_trades():
         )
 
 
+# Theme accent follows your account: green when profitable, red when not.
+trades = load_trades()
+net_pnl = trades["pnl"].sum() if not trades.empty else 0.0
+ACC = color_of(net_pnl)
+render(CSS.replace("__ACC__", ACC).replace("__RGB__", RGB[ACC]))
+
 if "flash" in st.session_state:
     st.toast(st.session_state.pop("flash"), icon="✅")
 
@@ -210,7 +226,7 @@ with st.sidebar:
         else:
             symbol = selected_pair
 
-        direction = st.selectbox("Direction", ["Buy / Long", "Sell / Short"])
+        direction = st.radio("Direction", ["Buy / Long", "Sell / Short"], horizontal=True)
 
         setup = st.selectbox(
             "Trading setup",
@@ -319,48 +335,51 @@ if submitted:
 
 
 # --------------------------------------------
-# 5. HEADER
+# 5. HEADER AND TABS
 # --------------------------------------------
 
 render(f"""
-<div class="hero">
-<div>
-<div class="title">Trading journal</div>
-<p>Log every trade, keep the charts, and see what is actually working.</p>
-</div>
+<div class="top">
+<div class="brand"><span class="live"></span>Trading Journal</div>
 <div class="today">{date.today():%A, %d %B %Y}</div>
 </div>
 """)
 
-trades = load_trades()
 tab_dash, tab_hist, tab_shots, tab_manage = st.tabs(
-    ["Dashboard", "Trade history", "Screenshots", "Manage"]
+    ["📊 Dashboard", "📚 History", "🖼️ Screenshots", "⚙️ Manage"]
 )
 
 
 # --------------------------------------------
-# 6. CHART STYLING HELPER
+# 6. CHART HELPERS
 # --------------------------------------------
 
 def style_chart(chart, height=300):
-    """Transparent, quiet chart that blends into the card behind it."""
+    """Transparent chart that blends into the glass card behind it."""
     return (
         chart.properties(height=height)
         .configure(background="transparent")
         .configure_view(stroke=None)
         .configure_axis(
             labelColor=MUTED, titleColor=MUTED,
-            gridColor="rgba(143,176,174,0.12)",
-            domainColor="rgba(143,176,174,0.25)",
-            tickColor="rgba(143,176,174,0.25)",
-            labelFont="Manrope", titleFont="Manrope",
+            gridColor="rgba(255,255,255,0.07)",
+            domainColor="rgba(255,255,255,0.15)",
+            tickColor="rgba(255,255,255,0.15)",
+            labelFont="Inter", titleFont="Inter",
             labelFontSize=11, titleFontSize=11, titleFontWeight=500,
         )
+        .configure_legend(labelColor=MUTED, titleColor=MUTED, labelFont="Inter")
     )
 
 
 def sign_color():
-    return alt.condition("datum.pnl >= 0", alt.value(MINT), alt.value(CORAL))
+    return alt.condition("datum.pnl >= 0", alt.value(GREEN), alt.value(RED))
+
+
+def kpi(label, value, sub="", color=None):
+    style = f' style="--c:{color}"' if color else ""
+    return (f'<div class="kpi"{style}><div class="l">{label}</div>'
+            f'<div class="v">{value}</div><div class="s">{sub}</div></div>')
 
 
 # --------------------------------------------
@@ -371,7 +390,7 @@ with tab_dash:
     if trades.empty:
         render("""
         <div class="empty"><b>Your journal is empty</b>
-        Add your first trade from the sidebar to see your stats here.</div>
+        Add your first trade from the sidebar to light this dashboard up.</div>
         """)
     else:
         win_df = trades[trades["pnl"] > 0]
@@ -379,7 +398,6 @@ with tab_dash:
         wins, losses = len(win_df), len(loss_df)
         decided = wins + losses
 
-        net_pnl = trades["pnl"].sum()
         win_rate = wins / decided * 100 if decided else 0
         gross_win = win_df["pnl"].sum()
         gross_loss = abs(loss_df["pnl"].sum())
@@ -403,30 +421,37 @@ with tab_dash:
             alt.Tooltip("pnl:Q", title="P/L", format=",.2f"),
         ]
 
-        left, right = st.columns([2, 3], gap="large")
+        # Hero
+        render(f"""
+        <div class="hero">
+        <div><div class="t">Net profit / loss</div><div class="n">{money(net_pnl, True)}</div></div>
+        <div class="mini">
+        <div><span>Trades</span><b>{len(trades)}</b></div>
+        <div><span>Best trade</span><b class="{tone(best)}">{money(best, True)}</b></div>
+        <div><span>Worst trade</span><b class="{tone(worst)}">{money(worst, True)}</b></div>
+        </div>
+        </div>
+        """)
+
+        # KPI cards
+        render('<div class="kpis">' + "".join([
+            kpi("Win rate", f"{win_rate:.1f}%", f"{wins} won, {losses} lost",
+                GREEN if win_rate >= 50 else RED),
+            kpi("Profit factor", profit_factor, "Gross win / gross loss"),
+            kpi("Average win", money(avg_win), "Per winning trade", GREEN),
+            kpi("Average loss", money(avg_loss), "Per losing trade", RED),
+        ]) + "</div>")
+
+        # Equity curve + win/loss donut
+        left, right = st.columns([3, 2], gap="large")
 
         with left:
-            render(f"""
-            <div class="ledger">
-            <div class="lbl">Net profit / loss</div>
-            <div class="big {tone(net_pnl)}">{money(net_pnl, True)}</div>
-            <div class="line"><span>Win rate</span><b>{win_rate:.1f}%</b></div>
-            <div class="line"><span>Profit factor</span><b>{profit_factor}</b></div>
-            <div class="line"><span>Trades</span><b>{len(trades)} ({wins} won, {losses} lost)</b></div>
-            <div class="line"><span>Average win</span><b class="pos">{money(avg_win)}</b></div>
-            <div class="line"><span>Average loss</span><b class="neg">{money(avg_loss)}</b></div>
-            <div class="line"><span>Best trade</span><b class="{tone(best)}">{money(best, True)}</b></div>
-            <div class="line"><span>Worst trade</span><b class="{tone(worst)}">{money(worst, True)}</b></div>
-            </div>
-            """)
-
-        with right:
-            render('<div class="sec" style="margin-top:0">Equity curve</div>')
+            render('<div class="sec">Equity curve</div>')
             fade = alt.Gradient(
                 gradient="linear",
                 stops=[
-                    alt.GradientStop(color="rgba(242,184,75,0.02)", offset=0),
-                    alt.GradientStop(color="rgba(242,184,75,0.35)", offset=1),
+                    alt.GradientStop(color="rgba(0,0,0,0)", offset=0),
+                    alt.GradientStop(color=f"rgba({RGB[ACC]},0.38)", offset=1),
                 ],
                 x1=1, x2=1, y1=1, y2=0,
             )
@@ -436,17 +461,37 @@ with tab_dash:
                 tooltip=tips + [alt.Tooltip("equity:Q", title="Equity", format=",.2f")],
             )
             curve = base.mark_area(
-                line={"color": AMBER, "strokeWidth": 2.5},
+                line={"color": ACC, "strokeWidth": 3},
                 color=fade, interpolate="monotone",
-            ) + base.mark_circle(color=AMBER, size=55)
-            wide(st.altair_chart, style_chart(curve, 330), theme=None)
+            ) + base.mark_circle(color=ACC, size=60)
+            wide(st.altair_chart, style_chart(curve, 320), theme=None)
 
+        with right:
+            render('<div class="sec">Win / loss split</div>')
+            if decided:
+                split = pd.DataFrame({"Result": ["Wins", "Losses"], "Trades": [wins, losses]})
+                donut = alt.Chart(split).mark_arc(
+                    innerRadius=70, cornerRadius=7, padAngle=0.04
+                ).encode(
+                    theta="Trades:Q",
+                    color=alt.Color(
+                        "Result:N", title=None,
+                        scale=alt.Scale(domain=["Wins", "Losses"], range=[GREEN, RED]),
+                        legend=alt.Legend(orient="bottom"),
+                    ),
+                    tooltip=["Result:N", "Trades:Q"],
+                )
+                wide(st.altair_chart, style_chart(donut, 320), theme=None)
+            else:
+                st.info("No winning or losing trades yet.")
+
+        # Per-trade bars + setup bars
         a, b = st.columns(2, gap="large")
 
         with a:
             render('<div class="sec">Profit and loss per trade</div>')
             bars = alt.Chart(ordered).mark_bar(
-                cornerRadiusTopLeft=3, cornerRadiusTopRight=3
+                cornerRadiusTopLeft=4, cornerRadiusTopRight=4
             ).encode(
                 x=alt.X("n:O", title="Trade #", axis=alt.Axis(labelAngle=0)),
                 y=alt.Y("pnl:Q", title="P/L"),
@@ -459,7 +504,7 @@ with tab_dash:
             render('<div class="sec">Results by setup</div>')
             by_setup = ordered.groupby("setup", as_index=False)["pnl"].sum()
             setup_bars = alt.Chart(by_setup).mark_bar(
-                cornerRadiusTopRight=4, cornerRadiusBottomRight=4
+                cornerRadiusTopRight=5, cornerRadiusBottomRight=5
             ).encode(
                 y=alt.Y("setup:N", sort="-x", title=None),
                 x=alt.X("pnl:Q", title="Total P/L"),
@@ -469,16 +514,16 @@ with tab_dash:
             )
             wide(st.altair_chart, style_chart(setup_bars, 280), theme=None)
 
+        # Latest trades
         render('<div class="sec">Latest trades</div>')
         rows = []
         for r in trades.head(6).itertuples():
-            is_long = "Long" in r.direction
-            tag_cls, tag = ("pos", "Long") if is_long else ("neg", "Short")
+            tag = "▲ Long" if "Long" in r.direction else "▼ Short"
             rows.append(
-                f'<div class="row"><div><div class="sym">{html.escape(str(r.symbol))}'
-                f'<span class="tag {tag_cls}">{tag}</span></div>'
+                f'<div class="row" style="--c:{color_of(r.pnl)}"><div>'
+                f'<div class="sym">{html.escape(str(r.symbol))}<span class="tag">{tag}</span></div>'
                 f'<div class="meta">{r.trade_date} - {html.escape(str(r.setup or "No setup"))}</div></div>'
-                f'<div class="amt {tone(r.pnl)}">{money(r.pnl, True)}</div></div>'
+                f'<div class="amt">{money(r.pnl, True)}</div></div>'
             )
         render("".join(rows))
 
@@ -505,9 +550,10 @@ with tab_hist:
         if selected_setup != "All":
             filtered = filtered[filtered["setup"] == selected_setup]
 
+        total = filtered["pnl"].sum()
         render(
-            f'<div class="sec">Trades<small>{len(filtered)} shown, '
-            f'{money(filtered["pnl"].sum(), True)} total</small></div>'
+            f'<div class="sec">Trades<small>{len(filtered)} shown, total '
+            f'<span class="{tone(total)}">{money(total, True)}</span></small></div>'
         )
 
         view = filtered[[
@@ -527,7 +573,10 @@ with tab_hist:
         def pnl_color(v):
             if pd.isna(v) or v == 0:
                 return ""
-            return f"color: {MINT if v > 0 else CORAL}; font-weight: 700"
+            return f"color: {GREEN if v > 0 else RED}; font-weight: 700"
+
+        def dir_color(v):
+            return f"color: {GREEN if 'Long' in str(v) else RED}; font-weight: 600"
 
         styled = view.style.format(
             {"Entry": "{:.5f}", "Exit": "{:.5f}", "Lot size": "{:.2f}",
@@ -536,6 +585,8 @@ with tab_hist:
         )
         paint = styled.map if hasattr(styled, "map") else styled.applymap
         styled = paint(pnl_color, subset=["P/L"])
+        paint = styled.map if hasattr(styled, "map") else styled.applymap
+        styled = paint(dir_color, subset=["Direction"])
 
         wide(
             st.dataframe, styled, hide_index=True,
