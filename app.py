@@ -198,6 +198,14 @@ SUPABASE_KEY = (
     or secret("SUPABASE_SECRET_KEY")
 )
 
+st.write("Checking Supabase configuration:")
+st.write("URL detected:", bool(SUPABASE_URL))
+st.write("Secret key detected:", bool(SUPABASE_KEY))
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Supabase credentials are missing. Check Streamlit Secrets.")
+    st.stop()
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("Supabase credentials could not be read.")
     st.write("SUPABASE_URL found:", bool(SUPABASE_URL))
