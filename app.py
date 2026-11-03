@@ -1,13 +1,13 @@
+
 # ============================================
 # TRADING JOURNAL - neon green / red edition
-# Python + Streamlit + SQLite + Pandas + Altair
-# Pair with .streamlit/config.toml (dark theme)
-# The whole UI glows GREEN when you are net profitable
-# and RED when you are net negative.
+# Python + Streamlit + Supabase + Pandas + Altair
 # ============================================
 
+import hmac
 import html
-import sqlite3
+import os
+import uuid
 from datetime import date
 from io import BytesIO
 
@@ -15,6 +15,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 from PIL import Image
+from supabase import create_client
 
 
 # --------------------------------------------
@@ -28,7 +29,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-DB_NAME = "trades.db"
+BUCKET = "trade-screenshots"
 
 GREEN, RED, MUTED = "#2bff88", "#ff3b5c", "#8a979a"
 RGB = {GREEN: "43,255,136", RED: "255,59,92"}
@@ -140,60 +141,222 @@ def color_of(value):
 
 
 # --------------------------------------------
-# 2. DATABASE
+# 2. DATABASE - UPDATED SECRETS FIX
 # --------------------------------------------
 
-def get_connection():
-    """Open a connection to the local SQLite database."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def secret(name):
+    """Read a value from Streamlit secrets, falling back to environment variables."""
+    try:
+        value = st.secrets.get(name)
+        if value:
+            return str(value).strip()
+    except Exception:
+        pass
+
+    value = os.environ.get(name)
+    return str(value).strip() if value else None
 
 
-def setup_database():
-    """Create the tables if they do not exist."""
-    with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_date TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                setup TEXT,
-                entry REAL,
-                exit_price REAL,
-                lot_size REAL,
-                risk_amount REAL,
-                pnl REAL NOT NULL,
-                notes TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS trade_images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_id INTEGER NOT NULL,
-                filename TEXT NOT NULL,
-                image_data BLOB NOT NULL,
-                FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
-            )
-        """)
+def require_login():
+    """Simple app-password gate."""
+    expected = secret("APP_PASSWORD")
+
+    if not expected:
+        st.error("APP_PASSWORD is missing. Add it to your Streamlit secrets.")
+        st.stop()
+
+    if st.session_state.get("authed"):
+        return
+
+    st.markdown("## 📈 Trading Journal")
+    st.caption("Enter your app password to continue.")
+
+    with st.form("login_form"):
+        password = st.text_input("Password", type="password")
+        unlock = st.form_submit_button("Unlock")
+
+    if unlock:
+        if hmac.compare_digest(password.encode(), expected.encode()):
+            st.session_state["authed"] = True
+            st.rerun()
+
+        st.error("Wrong password.")
+
+    st.stop()
 
 
-setup_database()
+require_login()
+
+# IMPORTANT:
+# These are secret NAMES, not the actual secret values.
+# Keep the actual credentials in Streamlit Secrets.
+
+SUPABASE_URL = secret("SUPABASE_URL")
+
+SUPABASE_KEY = (
+    secret("SUPABASE_SERVICE_ROLE_KEY")
+    or secret("SUPABASE_SECRET_KEY")
+)
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    st.error("Supabase credentials could not be read.")
+    st.write("SUPABASE_URL found:", bool(SUPABASE_URL))
+    st.write("Supabase secret key found:", bool(SUPABASE_KEY))
+    st.stop()
+
+
+@st.cache_resource
+def get_supabase():
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+sb = get_supabase()
+
+TRADE_COLUMNS = [
+    "id", "trade_date", "symbol", "direction", "setup", "entry",
+    "exit_price", "lot_size", "risk_amount", "pnl", "notes",
+]
+
+MIME_BY_FORMAT = {
+    "PNG": ("image/png", "png"),
+    "JPEG": ("image/jpeg", "jpg"),
+    "WEBP": ("image/webp", "webp"),
+}
 
 
 def load_trades():
-    """Load all trade records, newest first."""
-    with get_connection() as conn:
-        return pd.read_sql_query(
-            "SELECT * FROM trades ORDER BY trade_date DESC, id DESC", conn
+    """Load all trade records, newest first (paged, since Supabase returns 1000 rows max)."""
+    rows, start = [], 0
+
+    while True:
+        chunk = (
+            sb.table("trades").select("*")
+            .order("trade_date", desc=True).order("id", desc=True)
+            .range(start, start + 999).execute().data
+            or []
         )
+
+        rows += chunk
+
+        if len(chunk) < 1000:
+            break
+
+        start += 1000
+
+    return pd.DataFrame(rows, columns=TRADE_COLUMNS)
+
+
+def prepare_image(uploaded_file):
+    """Check size and real image type before anything is written."""
+    data = uploaded_file.getvalue()
+
+    if len(data) > 5 * 1024 * 1024:
+        raise ValueError(f"{uploaded_file.name} exceeds 5 MB.")
+
+    image = Image.open(BytesIO(data))
+    fmt = image.format
+    image.verify()
+
+    if fmt not in MIME_BY_FORMAT:
+        raise ValueError(f"{uploaded_file.name} must be a PNG, JPEG or WEBP image.")
+
+    mime, ext = MIME_BY_FORMAT[fmt]
+    return uploaded_file.name, data, mime, ext
+
+
+def save_trade(record, files):
+    """Insert a trade and upload its screenshots; undo everything if a step fails."""
+    prepared = [prepare_image(f) for f in files]
+    trade_id, uploaded = None, []
+
+    try:
+        trade_id = sb.table("trades").insert(record).execute().data[0]["id"]
+
+        for name, data, mime, ext in prepared:
+            path = f"{trade_id}/{uuid.uuid4().hex}.{ext}"
+
+            sb.storage.from_(BUCKET).upload(
+                path, data, {"content-type": mime}
+            )
+
+            uploaded.append(path)
+
+            sb.table("trade_images").insert(
+                {
+                    "trade_id": trade_id,
+                    "filename": name,
+                    "storage_path": path,
+                }
+            ).execute()
+
+        return trade_id
+
+    except Exception:
+        try:
+            if uploaded:
+                sb.storage.from_(BUCKET).remove(uploaded)
+
+            if trade_id:
+                sb.table("trades").delete().eq("id", trade_id).execute()
+
+        except Exception:
+            pass
+
+        raise
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def fetch_image(path):
+    return sb.storage.from_(BUCKET).download(path)
+
+
+def load_images(trade_id):
+    """Return (id, filename, bytes) for every screenshot of a trade."""
+    rows = (
+        sb.table("trade_images")
+        .select("id, filename, storage_path")
+        .eq("trade_id", trade_id)
+        .order("id")
+        .execute().data
+        or []
+    )
+
+    images = []
+
+    for r in rows:
+        try:
+            images.append(
+                (r["id"], r["filename"], fetch_image(r["storage_path"]))
+            )
+        except Exception:
+            st.warning(f"Could not load {r['filename']}.")
+
+    return images
+
+
+def delete_trade(trade_id):
+    """Delete the stored files first, then the trade (image rows cascade)."""
+    rows = (
+        sb.table("trade_images")
+        .select("storage_path")
+        .eq("trade_id", trade_id)
+        .execute().data
+        or []
+    )
+
+    paths = [r["storage_path"] for r in rows]
+
+    if paths:
+        sb.storage.from_(BUCKET).remove(paths)
+
+    sb.table("trades").delete().eq("id", trade_id).execute()
 
 
 # Theme accent follows your account: green when profitable, red when not.
 trades = load_trades()
 net_pnl = trades["pnl"].sum() if not trades.empty else 0.0
 ACC = color_of(net_pnl)
+
 render(CSS.replace("__ACC__", ACC).replace("__RGB__", RGB[ACC]))
 
 if "flash" in st.session_state:
@@ -217,16 +380,22 @@ with st.sidebar:
             "XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "GBPJPY",
             "NAS100", "US30", "BTCUSD", "Other / custom",
         ]
+
         selected_pair = st.selectbox("Pair or instrument", common_pairs)
 
         if selected_pair == "Other / custom":
             symbol = st.text_input(
-                "Custom pair or instrument", placeholder="e.g. AUDUSD, ETHUSD"
+                "Custom pair or instrument",
+                placeholder="e.g. AUDUSD, ETHUSD",
             ).strip().upper()
         else:
             symbol = selected_pair
 
-        direction = st.radio("Direction", ["Buy / Long", "Sell / Short"], horizontal=True)
+        direction = st.radio(
+            "Direction",
+            ["Buy / Long", "Sell / Short"],
+            horizontal=True,
+        )
 
         setup = st.selectbox(
             "Trading setup",
@@ -242,12 +411,20 @@ with st.sidebar:
         )
 
         c1, c2 = st.columns(2)
-        entry = c1.number_input("Entry price", min_value=0.0, value=0.0, format="%.5f")
-        exit_price = c2.number_input("Exit price", min_value=0.0, value=0.0, format="%.5f")
+        entry = c1.number_input(
+            "Entry price", min_value=0.0, value=0.0, format="%.5f"
+        )
+        exit_price = c2.number_input(
+            "Exit price", min_value=0.0, value=0.0, format="%.5f"
+        )
 
         c3, c4 = st.columns(2)
-        lot_size = c3.number_input("Lot size", min_value=0.0, value=0.01, step=0.01)
-        risk_amount = c4.number_input("Risk amount", min_value=0.0, value=0.0, step=1.0)
+        lot_size = c3.number_input(
+            "Lot size", min_value=0.0, value=0.01, step=0.01
+        )
+        risk_amount = c4.number_input(
+            "Risk amount", min_value=0.0, value=0.0, step=1.0
+        )
 
         pnl = st.number_input(
             "Realized P/L",
@@ -291,40 +468,27 @@ if submitted:
 
     else:
         try:
-            with get_connection() as conn:
-                cursor = conn.execute(
-                    """
-                    INSERT INTO trades (
-                        trade_date, symbol, direction, setup,
-                        entry, exit_price, lot_size, risk_amount, pnl, notes
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        trade_date.isoformat(), symbol, direction, setup,
-                        entry, exit_price, lot_size, risk_amount, pnl, notes,
-                    ),
-                )
-                trade_id = cursor.lastrowid
-
-                for uploaded_file in screenshots or []:
-                    image_bytes = uploaded_file.getvalue()
-
-                    # Limit each upload to 5 MB.
-                    if len(image_bytes) > 5 * 1024 * 1024:
-                        raise ValueError(f"{uploaded_file.name} exceeds 5 MB.")
-
-                    # Confirm the file really is an image before storing it.
-                    Image.open(BytesIO(image_bytes)).verify()
-
-                    conn.execute(
-                        "INSERT INTO trade_images (trade_id, filename, image_data) VALUES (?, ?, ?)",
-                        (trade_id, uploaded_file.name, sqlite3.Binary(image_bytes)),
-                    )
+            trade_id = save_trade(
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "symbol": symbol,
+                    "direction": direction,
+                    "setup": setup,
+                    "entry": entry,
+                    "exit_price": exit_price,
+                    "lot_size": lot_size,
+                    "risk_amount": risk_amount,
+                    "pnl": pnl,
+                    "notes": notes,
+                },
+                screenshots or [],
+            )
 
             st.session_state["flash"] = (
-                f"Trade #{trade_id} saved with {len(screenshots or [])} screenshot(s)."
+                f"Trade #{trade_id} saved with "
+                f"{len(screenshots or [])} screenshot(s)."
             )
+
             saved = True
 
         except Exception as error:
@@ -361,25 +525,39 @@ def style_chart(chart, height=300):
         .configure(background="transparent")
         .configure_view(stroke=None)
         .configure_axis(
-            labelColor=MUTED, titleColor=MUTED,
+            labelColor=MUTED,
+            titleColor=MUTED,
             gridColor="rgba(255,255,255,0.07)",
             domainColor="rgba(255,255,255,0.15)",
             tickColor="rgba(255,255,255,0.15)",
-            labelFont="Inter", titleFont="Inter",
-            labelFontSize=11, titleFontSize=11, titleFontWeight=500,
+            labelFont="Inter",
+            titleFont="Inter",
+            labelFontSize=11,
+            titleFontSize=11,
+            titleFontWeight=500,
         )
-        .configure_legend(labelColor=MUTED, titleColor=MUTED, labelFont="Inter")
+        .configure_legend(
+            labelColor=MUTED,
+            titleColor=MUTED,
+            labelFont="Inter",
+        )
     )
 
 
 def sign_color():
-    return alt.condition("datum.pnl >= 0", alt.value(GREEN), alt.value(RED))
+    return alt.condition(
+        "datum.pnl >= 0",
+        alt.value(GREEN),
+        alt.value(RED),
+    )
 
 
 def kpi(label, value, sub="", color=None):
     style = f' style="--c:{color}"' if color else ""
-    return (f'<div class="kpi"{style}><div class="l">{label}</div>'
-            f'<div class="v">{value}</div><div class="s">{sub}</div></div>')
+    return (
+        f'<div class="kpi"{style}><div class="l">{label}</div>'
+        f'<div class="v">{value}</div><div class="s">{sub}</div></div>'
+    )
 
 
 # --------------------------------------------
@@ -392,24 +570,31 @@ with tab_dash:
         <div class="empty"><b>Your journal is empty</b>
         Add your first trade from the sidebar to light this dashboard up.</div>
         """)
+
     else:
         win_df = trades[trades["pnl"] > 0]
         loss_df = trades[trades["pnl"] < 0]
+
         wins, losses = len(win_df), len(loss_df)
         decided = wins + losses
 
         win_rate = wins / decided * 100 if decided else 0
         gross_win = win_df["pnl"].sum()
         gross_loss = abs(loss_df["pnl"].sum())
+
         if gross_loss:
             profit_factor = f"{gross_win / gross_loss:.2f}"
         else:
             profit_factor = "∞" if gross_win else "-"
+
         avg_win = win_df["pnl"].mean() if wins else 0
         avg_loss = loss_df["pnl"].mean() if losses else 0
         best, worst = trades["pnl"].max(), trades["pnl"].min()
 
-        ordered = trades.sort_values(["trade_date", "id"]).reset_index(drop=True)
+        ordered = trades.sort_values(
+            ["trade_date", "id"]
+        ).reset_index(drop=True)
+
         ordered["n"] = ordered.index + 1
         ordered["equity"] = ordered["pnl"].cumsum()
         ordered["setup"] = ordered["setup"].fillna("Other")
@@ -435,8 +620,12 @@ with tab_dash:
 
         # KPI cards
         render('<div class="kpis">' + "".join([
-            kpi("Win rate", f"{win_rate:.1f}%", f"{wins} won, {losses} lost",
-                GREEN if win_rate >= 50 else RED),
+            kpi(
+                "Win rate",
+                f"{win_rate:.1f}%",
+                f"{wins} won, {losses} lost",
+                GREEN if win_rate >= 50 else RED,
+            ),
             kpi("Profit factor", profit_factor, "Gross win / gross loss"),
             kpi("Average win", money(avg_win), "Per winning trade", GREEN),
             kpi("Average loss", money(avg_loss), "Per losing trade", RED),
@@ -447,41 +636,77 @@ with tab_dash:
 
         with left:
             render('<div class="sec">Equity curve</div>')
+
             fade = alt.Gradient(
                 gradient="linear",
                 stops=[
                     alt.GradientStop(color="rgba(0,0,0,0)", offset=0),
-                    alt.GradientStop(color=f"rgba({RGB[ACC]},0.38)", offset=1),
+                    alt.GradientStop(
+                        color=f"rgba({RGB[ACC]},0.38)", offset=1
+                    ),
                 ],
-                x1=1, x2=1, y1=1, y2=0,
+                x1=1,
+                x2=1,
+                y1=1,
+                y2=0,
             )
+
             base = alt.Chart(ordered).encode(
-                x=alt.X("n:Q", title="Trade #", axis=alt.Axis(tickMinStep=1, format="d")),
+                x=alt.X(
+                    "n:Q",
+                    title="Trade #",
+                    axis=alt.Axis(tickMinStep=1, format="d"),
+                ),
                 y=alt.Y("equity:Q", title="Cumulative P/L"),
-                tooltip=tips + [alt.Tooltip("equity:Q", title="Equity", format=",.2f")],
+                tooltip=tips + [
+                    alt.Tooltip(
+                        "equity:Q",
+                        title="Equity",
+                        format=",.2f",
+                    )
+                ],
             )
-            curve = base.mark_area(
-                line={"color": ACC, "strokeWidth": 3},
-                color=fade, interpolate="monotone",
-            ) + base.mark_circle(color=ACC, size=60)
+
+            curve = (
+                base.mark_area(
+                    line={"color": ACC, "strokeWidth": 3},
+                    color=fade,
+                    interpolate="monotone",
+                )
+                + base.mark_circle(color=ACC, size=60)
+            )
+
             wide(st.altair_chart, style_chart(curve, 320), theme=None)
 
         with right:
             render('<div class="sec">Win / loss split</div>')
+
             if decided:
-                split = pd.DataFrame({"Result": ["Wins", "Losses"], "Trades": [wins, losses]})
+                split = pd.DataFrame({
+                    "Result": ["Wins", "Losses"],
+                    "Trades": [wins, losses],
+                })
+
                 donut = alt.Chart(split).mark_arc(
-                    innerRadius=70, cornerRadius=7, padAngle=0.04
+                    innerRadius=70,
+                    cornerRadius=7,
+                    padAngle=0.04,
                 ).encode(
                     theta="Trades:Q",
                     color=alt.Color(
-                        "Result:N", title=None,
-                        scale=alt.Scale(domain=["Wins", "Losses"], range=[GREEN, RED]),
+                        "Result:N",
+                        title=None,
+                        scale=alt.Scale(
+                            domain=["Wins", "Losses"],
+                            range=[GREEN, RED],
+                        ),
                         legend=alt.Legend(orient="bottom"),
                     ),
                     tooltip=["Result:N", "Trades:Q"],
                 )
+
                 wide(st.altair_chart, style_chart(donut, 320), theme=None)
+
             else:
                 st.info("No winning or losing trades yet.")
 
@@ -490,41 +715,64 @@ with tab_dash:
 
         with a:
             render('<div class="sec">Profit and loss per trade</div>')
+
             bars = alt.Chart(ordered).mark_bar(
-                cornerRadiusTopLeft=4, cornerRadiusTopRight=4
+                cornerRadiusTopLeft=4,
+                cornerRadiusTopRight=4,
             ).encode(
-                x=alt.X("n:O", title="Trade #", axis=alt.Axis(labelAngle=0)),
+                x=alt.X(
+                    "n:O",
+                    title="Trade #",
+                    axis=alt.Axis(labelAngle=0),
+                ),
                 y=alt.Y("pnl:Q", title="P/L"),
                 color=sign_color(),
                 tooltip=tips,
             )
+
             wide(st.altair_chart, style_chart(bars, 280), theme=None)
 
         with b:
             render('<div class="sec">Results by setup</div>')
-            by_setup = ordered.groupby("setup", as_index=False)["pnl"].sum()
+
+            by_setup = ordered.groupby(
+                "setup", as_index=False
+            )["pnl"].sum()
+
             setup_bars = alt.Chart(by_setup).mark_bar(
-                cornerRadiusTopRight=5, cornerRadiusBottomRight=5
+                cornerRadiusTopRight=5,
+                cornerRadiusBottomRight=5,
             ).encode(
                 y=alt.Y("setup:N", sort="-x", title=None),
                 x=alt.X("pnl:Q", title="Total P/L"),
                 color=sign_color(),
-                tooltip=[alt.Tooltip("setup:N", title="Setup"),
-                         alt.Tooltip("pnl:Q", title="P/L", format=",.2f")],
+                tooltip=[
+                    alt.Tooltip("setup:N", title="Setup"),
+                    alt.Tooltip(
+                        "pnl:Q",
+                        title="P/L",
+                        format=",.2f",
+                    ),
+                ],
             )
+
             wide(st.altair_chart, style_chart(setup_bars, 280), theme=None)
 
         # Latest trades
         render('<div class="sec">Latest trades</div>')
+
         rows = []
+
         for r in trades.head(6).itertuples():
             tag = "▲ Long" if "Long" in r.direction else "▼ Short"
+
             rows.append(
                 f'<div class="row" style="--c:{color_of(r.pnl)}"><div>'
                 f'<div class="sym">{html.escape(str(r.symbol))}<span class="tag">{tag}</span></div>'
                 f'<div class="meta">{r.trade_date} - {html.escape(str(r.setup or "No setup"))}</div></div>'
                 f'<div class="amt">{money(r.pnl, True)}</div></div>'
             )
+
         render("".join(rows))
 
 
@@ -534,23 +782,33 @@ with tab_dash:
 
 with tab_hist:
     if trades.empty:
-        render('<div class="empty"><b>No trades yet</b>Saved trades appear here.</div>')
+        render(
+            '<div class="empty"><b>No trades yet</b>Saved trades appear here.</div>'
+        )
+
     else:
         f1, f2 = st.columns(2)
+
         selected_symbol = f1.selectbox(
-            "Pair or instrument", ["All"] + sorted(trades["symbol"].unique().tolist())
+            "Pair or instrument",
+            ["All"] + sorted(trades["symbol"].unique().tolist()),
         )
+
         selected_setup = f2.selectbox(
-            "Setup", ["All"] + sorted(trades["setup"].dropna().unique().tolist())
+            "Setup",
+            ["All"] + sorted(trades["setup"].dropna().unique().tolist()),
         )
 
         filtered = trades.copy()
+
         if selected_symbol != "All":
             filtered = filtered[filtered["symbol"] == selected_symbol]
+
         if selected_setup != "All":
             filtered = filtered[filtered["setup"] == selected_setup]
 
         total = filtered["pnl"].sum()
+
         render(
             f'<div class="sec">Trades<small>{len(filtered)} shown, total '
             f'<span class="{tone(total)}">{money(total, True)}</span></small></div>'
@@ -560,14 +818,23 @@ with tab_hist:
             "id", "trade_date", "symbol", "direction", "setup",
             "entry", "exit_price", "lot_size", "risk_amount", "pnl", "notes",
         ]].copy()
+
         view["direction"] = view["direction"].map(
             lambda d: "▲ Long" if "Long" in d else "▼ Short"
         )
+
         view = view.rename(columns={
-            "id": "Trade ID", "trade_date": "Date", "symbol": "Pair",
-            "direction": "Direction", "setup": "Setup", "entry": "Entry",
-            "exit_price": "Exit", "lot_size": "Lot size", "risk_amount": "Risk",
-            "pnl": "P/L", "notes": "Notes",
+            "id": "Trade ID",
+            "trade_date": "Date",
+            "symbol": "Pair",
+            "direction": "Direction",
+            "setup": "Setup",
+            "entry": "Entry",
+            "exit_price": "Exit",
+            "lot_size": "Lot size",
+            "risk_amount": "Risk",
+            "pnl": "P/L",
+            "notes": "Notes",
         })
 
         def pnl_color(v):
@@ -576,21 +843,38 @@ with tab_hist:
             return f"color: {GREEN if v > 0 else RED}; font-weight: 700"
 
         def dir_color(v):
-            return f"color: {GREEN if 'Long' in str(v) else RED}; font-weight: 600"
+            return (
+                f"color: {GREEN if 'Long' in str(v) else RED}; "
+                "font-weight: 600"
+            )
 
         styled = view.style.format(
-            {"Entry": "{:.5f}", "Exit": "{:.5f}", "Lot size": "{:.2f}",
-             "Risk": "{:,.2f}", "P/L": "{:+,.2f}"},
+            {
+                "Entry": "{:.5f}",
+                "Exit": "{:.5f}",
+                "Lot size": "{:.2f}",
+                "Risk": "{:,.2f}",
+                "P/L": "{:+,.2f}",
+            },
             na_rep="-",
         )
+
         paint = styled.map if hasattr(styled, "map") else styled.applymap
         styled = paint(pnl_color, subset=["P/L"])
+
         paint = styled.map if hasattr(styled, "map") else styled.applymap
         styled = paint(dir_color, subset=["Direction"])
 
         wide(
-            st.dataframe, styled, hide_index=True,
-            column_config={"Notes": st.column_config.TextColumn("Notes", width="large")},
+            st.dataframe,
+            styled,
+            hide_index=True,
+            column_config={
+                "Notes": st.column_config.TextColumn(
+                    "Notes",
+                    width="large",
+                )
+            },
         )
 
         st.download_button(
@@ -607,35 +891,40 @@ with tab_hist:
 
 with tab_shots:
     if trades.empty:
-        render('<div class="empty"><b>No screenshots yet</b>Attach charts when you log a trade.</div>')
+        render(
+            '<div class="empty"><b>No screenshots yet</b>Attach charts when you log a trade.</div>'
+        )
+
     else:
         trade_options = {
             f"#{int(row['id'])} | {row['trade_date']} | {row['symbol']} | P/L {row['pnl']:.2f}":
             int(row["id"])
             for _, row in trades.iterrows()
         }
-        selected_label = st.selectbox(
-            "Choose a trade", list(trade_options.keys()), key="image_trade"
-        )
-        selected_trade_id = trade_options[selected_label]
 
-        with get_connection() as conn:
-            images = conn.execute(
-                "SELECT id, filename, image_data FROM trade_images WHERE trade_id = ? ORDER BY id",
-                (selected_trade_id,),
-            ).fetchall()
+        selected_label = st.selectbox(
+            "Choose a trade",
+            list(trade_options.keys()),
+            key="image_trade",
+        )
+
+        selected_trade_id = trade_options[selected_label]
+        images = load_images(selected_trade_id)
 
         if images:
             cols = st.columns(2, gap="large")
+
             for index, (image_id, filename, image_data) in enumerate(images):
                 with cols[index % 2]:
                     wide(st.image, bytes(image_data), caption=filename)
+
                     st.download_button(
                         "Download screenshot",
                         data=bytes(image_data),
                         file_name=filename,
                         key=f"download_image_{image_id}",
                     )
+
         else:
             st.info("No screenshots are attached to this trade yet.")
 
@@ -646,20 +935,39 @@ with tab_shots:
 
 with tab_manage:
     if trades.empty:
-        render('<div class="empty"><b>Nothing to manage</b>Your trades will show up here.</div>')
+        render(
+            '<div class="empty"><b>Nothing to manage</b>Your trades will show up here.</div>'
+        )
+
     else:
         render('<div class="sec">Delete a trade</div>')
-        delete_id = st.selectbox("Trade ID to delete", trades["id"].astype(int).tolist())
-        confirm = st.checkbox(f"I understand that trade #{delete_id} and its screenshots will be deleted.")
+
+        delete_id = st.selectbox(
+            "Trade ID to delete",
+            trades["id"].astype(int).tolist(),
+        )
+
+        confirm = st.checkbox(
+            f"I understand that trade #{delete_id} and its screenshots will be deleted."
+        )
 
         if st.button("Delete trade"):
             if confirm:
-                with get_connection() as conn:
-                    conn.execute("DELETE FROM trade_images WHERE trade_id = ?", (delete_id,))
-                    conn.execute("DELETE FROM trades WHERE id = ?", (delete_id,))
-                st.session_state["flash"] = f"Trade #{delete_id} and its screenshots were deleted."
+                try:
+                    delete_trade(delete_id)
+
+                except Exception as error:
+                    st.error(f"Could not delete trade: {error}")
+                    st.stop()
+
+                st.session_state["flash"] = (
+                    f"Trade #{delete_id} and its screenshots were deleted."
+                )
+
                 st.rerun()
+
             else:
                 st.warning("Tick the confirmation box before deleting.")
 
-st.caption("Manual record keeping. Back up trades.db before you deploy.")
+
+st.caption("Stored in Supabase. Keep your service-role key private.")
